@@ -15,7 +15,7 @@ import type { Request } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ConfigService } from '@nestjs/config';
 
-import { buildIngestCallerLogPayload } from '../auth/caller-context.util';
+import { buildIngestCallerLogPayload, resolveIngestBillingPlan } from '../auth/caller-context.util';
 import type { JwtAuthUser } from '../auth/jwt.strategy';
 import { IngestJobsService } from '../ingest-jobs/ingest-jobs.service';
 import type { IngestJobResponseDto } from '../ingest-jobs/dto/ingest-job-response.dto';
@@ -23,6 +23,7 @@ import { QueueProducerService } from '../queue/queue.producer.service';
 import type { TrackDocument } from '../tracks/schemas/track.schema';
 import { MAX_MP3_UPLOAD_BYTES } from '../upload-limits.constants';
 import { IngestUrlDto } from './dto/ingest-url.dto';
+import { ImportQuotaService } from './import-quota.service';
 import { IngestUrlService } from './ingest-url.service';
 import { IngestService } from './ingest.service';
 
@@ -50,7 +51,15 @@ export class IngestController {
     private readonly ingestJobs: IngestJobsService,
     private readonly queueProducer: QueueProducerService,
     private readonly ingestUrl: IngestUrlService,
+    private readonly importQuota: ImportQuotaService,
   ) {}
+
+  @Get('ingest/quota')
+  async getImportQuota(@Req() req: RequestWithJwtUser) {
+    const caller = buildIngestCallerLogPayload(req, req.user);
+    const plan = resolveIngestBillingPlan(caller);
+    return this.importQuota.getStatus(caller.auth0Sub, plan);
+  }
 
   @Get('ingest/jobs/:jobId')
   async getIngestJob(@Param('jobId') jobId: string): Promise<IngestJobResponseDto> {
@@ -89,12 +98,26 @@ export class IngestController {
     const caller = buildIngestCallerLogPayload(req, req.user);
     const asyncEnabled = this.config.get<string>('INGEST_ASYNC_ENABLED') === '1';
     if (!asyncEnabled) {
+      await this.importQuota.assertCanImport(caller);
       const track = await this.ingestService.run({
         file,
         metaRaw,
         caller,
       });
-      return { track: trackToJson(track), status: 'completed' };
+      const trackJson = trackToJson(track);
+      const trackId =
+        typeof trackJson.trackId === 'string' ? trackJson.trackId : undefined;
+      const trackObjectId =
+        track && typeof track === 'object' && '_id' in track
+          ? String((track as { _id?: unknown })._id ?? '')
+          : undefined;
+      await this.ingestJobs.recordSyncImportUsage({
+        ownerSub: caller.auth0Sub,
+        inputRef: { fileName: file.originalname, fileSize: file.size, mode: 'sync' },
+        trackId,
+        trackObjectId: trackObjectId || undefined,
+      });
+      return { track: trackJson, status: 'completed' };
     }
 
     const idempotencyKey = this.ingestJobs.createIdempotencyKey({
@@ -110,6 +133,8 @@ export class IngestController {
         progressPercent: existing.progressPercent,
       };
     }
+
+    await this.importQuota.assertCanImport(caller);
 
     const job = await this.ingestJobs.createQueuedJob({
       ownerSub: caller.auth0Sub,

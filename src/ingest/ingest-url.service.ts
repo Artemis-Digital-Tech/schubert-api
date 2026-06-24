@@ -19,6 +19,7 @@ import { IngestJobsService } from '../ingest-jobs/ingest-jobs.service';
 import type { IngestUrlQueuePayload } from '../queue/queue.producer.service';
 import { QueueProducerService } from '../queue/queue.producer.service';
 import type { IngestUrlDto } from './dto/ingest-url.dto';
+import { ImportQuotaService } from './import-quota.service';
 import { IngestService } from './ingest.service';
 import { detectSourcePlatform, type SourcePlatform } from './platform-detect.util';
 
@@ -60,6 +61,7 @@ export class IngestUrlService {
     private readonly ingestJobs: IngestJobsService,
     private readonly queueProducer: QueueProducerService,
     private readonly ingestService: IngestService,
+    private readonly importQuota: ImportQuotaService,
   ) {}
 
   async ingestFromUrl(dto: IngestUrlDto, caller: IngestCallerLogPayload): Promise<IngestUrlResult> {
@@ -97,6 +99,8 @@ export class IngestUrlService {
         progressPercent: existing.progressPercent,
       };
     }
+
+    await this.importQuota.assertCanImport(caller);
 
     const job = await this.ingestJobs.createQueuedJob({
       ownerSub: caller.auth0Sub,
@@ -189,6 +193,8 @@ export class IngestUrlService {
     caller: IngestCallerLogPayload,
     platform: SourcePlatform,
   ): Promise<IngestUrlSyncResult> {
+    await this.importQuota.assertCanImport(caller);
+
     const meta = await this.resolveMetadata(dto, platform);
     const audioSourceUrl = await this.resolveAudioUrl(dto.sourceUrl, platform, meta);
 
@@ -224,6 +230,17 @@ export class IngestUrlService {
     const t = track as unknown as { toJSON?: () => Record<string, unknown> };
     const json =
       typeof t.toJSON === 'function' ? t.toJSON() : (track as unknown as Record<string, unknown>);
+    const trackId = typeof json.trackId === 'string' ? json.trackId : undefined;
+    const trackObjectId =
+      track && typeof track === 'object' && '_id' in track
+        ? String((track as { _id?: unknown })._id ?? '')
+        : undefined;
+    await this.ingestJobs.recordSyncImportUsage({
+      ownerSub: caller.auth0Sub,
+      inputRef: { sourceUrl: dto.sourceUrl, platform, mode: 'sync' },
+      trackId,
+      trackObjectId: trackObjectId || undefined,
+    });
     return { track: json, status: 'completed' };
   }
 

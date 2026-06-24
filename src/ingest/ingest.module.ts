@@ -18,6 +18,7 @@ import {
   LYRICS_SEARCH_PROVIDER,
 } from './ingest.tokens';
 import { IngestController } from './ingest.controller';
+import { ImportQuotaService } from './import-quota.service';
 import { IngestUrlService } from './ingest-url.service';
 import { IngestService } from './ingest.service';
 import { AudioshakeLyricsTranscriptionProvider } from './providers/audioshake-lyrics-transcription.provider';
@@ -44,6 +45,7 @@ import { LyricsTranscriptionStrategyFactory } from './strategies/lyrics-transcri
   providers: [
     IngestService,
     IngestUrlService,
+    ImportQuotaService,
     LyricsTranscriptionStrategyFactory,
     { provide: CHORD_SECTION_PROVIDER, useClass: MusicAiChordSectionProvider },
     { provide: LYRICS_SEARCH_PROVIDER, useClass: LrclibLyricsSearchProvider },

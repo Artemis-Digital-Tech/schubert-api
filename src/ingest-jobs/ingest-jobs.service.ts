@@ -2,12 +2,15 @@ import { randomBytes, createHash } from 'crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
+import { IMPORT_QUOTA_WINDOW_MS } from '../ingest/import-quota.constants';
 import {
   IngestJob,
   IngestJobDocument,
   IngestStageStatus,
 } from './schemas/ingest-job.schema';
 import type { IngestJobResponseDto } from './dto/ingest-job-response.dto';
+
+const QUOTA_COUNT_STATUSES = ['queued', 'running', 'completed'] as const;
 
 @Injectable()
 export class IngestJobsService {
@@ -49,6 +52,57 @@ export class IngestJobsService {
       })
       .sort({ createdAt: -1 })
       .exec();
+  }
+
+  private weeklyWindowStart(): Date {
+    return new Date(Date.now() - IMPORT_QUOTA_WINDOW_MS);
+  }
+
+  /** Importações na janela deslizante de 7 dias (queued, running ou completed). */
+  async countWeeklyImports(ownerSub: string): Promise<number> {
+    return this.ingestJobModel
+      .countDocuments({
+        ownerSub,
+        createdAt: { $gte: this.weeklyWindowStart() },
+        status: { $in: [...QUOTA_COUNT_STATUSES] },
+      })
+      .exec();
+  }
+
+  async findOldestWeeklyImport(ownerSub: string): Promise<Date | null> {
+    const doc = await this.ingestJobModel
+      .findOne({
+        ownerSub,
+        createdAt: { $gte: this.weeklyWindowStart() },
+        status: { $in: [...QUOTA_COUNT_STATUSES] },
+      })
+      .sort({ createdAt: 1 })
+      .select('createdAt')
+      .lean<{ createdAt?: Date }>()
+      .exec();
+    if (!doc?.createdAt) return null;
+    return doc.createdAt instanceof Date ? doc.createdAt : new Date(doc.createdAt);
+  }
+
+  /** Registo de uso para ingestão síncrona (sem fila assíncrona). */
+  async recordSyncImportUsage(input: {
+    ownerSub: string;
+    inputRef?: Record<string, unknown>;
+    trackId?: string;
+    trackObjectId?: string;
+  }): Promise<void> {
+    const jobId = `ij_${randomBytes(8).toString('hex')}`;
+    await this.ingestJobModel.create({
+      jobId,
+      ownerSub: input.ownerSub,
+      status: 'completed',
+      progressPercent: 100,
+      currentStage: 'completed',
+      inputRef: { ...(input.inputRef ?? {}), sync: true },
+      resultTrackId: input.trackId,
+      resultTrackObjectId: input.trackObjectId,
+      stages: [],
+    });
   }
 
   async createQueuedJob(input: {
