@@ -236,7 +236,7 @@ export class IngestService {
             60 * 60 * 24 * 30,
           );
           this.logger.log(
-            `Transcrição (AudioShake): ${lyrics.length} segmento(s).`,
+            `Transcrição (AssemblyAI): ${lyrics.length} segmento(s).`,
           );
         }
       }
@@ -304,20 +304,20 @@ export class IngestService {
       const uploadedAudioUrl =
         fileBytes > 0
           ? await this.audioStorage
-              .uploadIngestAudio({
-                buffer: input.file.buffer,
-                mimeType: input.file.mimetype || 'audio/mpeg',
-                ownerSub: auth0Sub,
-                trackIdHint: trackId,
-              })
-              .catch((err) => {
-                const message =
-                  err instanceof Error ? err.message : String(err);
-                this.logger.error(
-                  `Falha no upload do áudio para storage (trackId=${trackId}): ${message}`,
-                );
-                return null;
-              })
+            .uploadIngestAudio({
+              buffer: input.file.buffer,
+              mimeType: input.file.mimetype || 'audio/mpeg',
+              ownerSub: auth0Sub,
+              trackIdHint: trackId,
+            })
+            .catch((err) => {
+              const message =
+                err instanceof Error ? err.message : String(err);
+              this.logger.error(
+                `Falha no upload do áudio para storage (trackId=${trackId}): ${message}`,
+              );
+              return null;
+            })
           : null;
       const persistedAudioUrl =
         uploadedAudioUrl || existing?.meta?.audioUrl || undefined;

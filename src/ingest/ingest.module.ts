@@ -13,7 +13,7 @@ import { QueueWorkerService } from '../queue/queue.worker.service';
 import { SlugModule } from '../slug/slug.module';
 import { Track, TrackSchema } from '../tracks/schemas/track.schema';
 import {
-  AUDIOSHAKE_TRANSCRIPTION_PROVIDER,
+  ASSEMBLYAI_TRANSCRIPTION_PROVIDER,
   CHORD_SECTION_PROVIDER,
   LYRICS_SEARCH_PROVIDER,
 } from './ingest.tokens';
@@ -21,7 +21,7 @@ import { IngestController } from './ingest.controller';
 import { ImportQuotaService } from './import-quota.service';
 import { IngestUrlService } from './ingest-url.service';
 import { IngestService } from './ingest.service';
-import { AudioshakeLyricsTranscriptionProvider } from './providers/audioshake-lyrics-transcription.provider';
+import { AssemblyaiLyricsTranscriptionProvider } from './providers/assemblyai-lyrics-transcription.provider';
 import { LrclibLyricsSearchProvider } from './providers/lrclib-lyrics-search.provider';
 import { MusicAiChordSectionProvider } from './providers/music-ai-chord-section.provider';
 import { LyricsTranscriptionStrategyFactory } from './strategies/lyrics-transcription-strategy.factory';
@@ -50,8 +50,8 @@ import { LyricsTranscriptionStrategyFactory } from './strategies/lyrics-transcri
     { provide: CHORD_SECTION_PROVIDER, useClass: MusicAiChordSectionProvider },
     { provide: LYRICS_SEARCH_PROVIDER, useClass: LrclibLyricsSearchProvider },
     {
-      provide: AUDIOSHAKE_TRANSCRIPTION_PROVIDER,
-      useClass: AudioshakeLyricsTranscriptionProvider,
+      provide: ASSEMBLYAI_TRANSCRIPTION_PROVIDER,
+      useClass: AssemblyaiLyricsTranscriptionProvider,
     },
     QueueWorkerService,
   ],

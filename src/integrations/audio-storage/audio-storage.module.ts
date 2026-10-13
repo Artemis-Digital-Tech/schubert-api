@@ -34,4 +34,4 @@ const audioStorageLogger = new Logger('AudioStorageModule');
   ],
   exports: [AudioStoragePort],
 })
-export class AudioStorageModule {}
+export class AudioStorageModule { }

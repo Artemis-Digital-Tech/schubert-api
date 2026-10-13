@@ -1,6 +1,6 @@
 # schubert-api
 
-API backend **NestJS** do produto Cifra.ai: ingestão de áudio MP3, análise de acordes/seções (Music.ai), letras (LRCLIB + transcrição Audioshake), reconhecimento musical (AudD), persistência em **MongoDB** e filas **BullMQ** opcionais para ingestão assíncrona.
+API backend **NestJS** do produto Cifra.ai: ingestão de áudio MP3, análise de acordes/seções (Music.ai), letras (LRCLIB + transcrição AssemblyAI), reconhecimento musical (AudD), persistência em **MongoDB** e filas **BullMQ** opcionais para ingestão assíncrona.
 
 ---
 
@@ -49,7 +49,7 @@ flowchart TB
   subgraph External[Serviços externos]
     MA[Music.ai workflows]
     LR[LRCLIB]
-    ASH[Audioshake]
+    ASH[AssemblyAI]
     AUDD[api.audd.io]
     GYT[Google YouTube Data API v3]
     S3[(S3)]
@@ -177,7 +177,7 @@ Se `REDIS_URL` estiver definido e `BULLBOARD_ENABLED` não for `0`, o servidor m
 Ordem lógica dos estágios reportados ao cliente (`onStage` / `IngestJobsService`):
 
 1. **`resolveChordsAndSections`** — análise do ficheiro MP3 via Music.ai (com cache Redis por hash SHA-256 do áudio).
-2. **`resolveLyrics`** — LRCLIB quando há `title`/`artist` no meta e pesquisa não está desativada; senão transcrição alinhada (Audioshake) via `LyricsTranscriptionStrategyFactory`.
+2. **`resolveLyrics`** — LRCLIB quando há `title`/`artist` no meta e pesquisa não está desativada; senão transcrição alinhada (AssemblyAI) via `LyricsTranscriptionStrategyFactory`.
 3. **`uploadAudio`** — envio opcional para storage (`AUDIO_STORAGE_PROVIDER`).
 4. **`resolveYoutube`** — URL explícita no meta, cache, ou pesquisa YouTube Data API (`YOUTUBE_DATA_API_KEY`).
 5. **`persistTrack`** — gravação/atualização em MongoDB (`Track`, `Artist`, slugs).
@@ -203,7 +203,7 @@ Copie `.env.example` para `.env` e preencha os segredos. Variáveis frequentes:
 | `AUDIO_STORAGE_*` | Áudio persistido (S3 ou noop) |
 | `SENTRY_*` | Erros e tracing |
 
-Variáveis adicionais (LRCLIB, Audioshake, Music.ai fine-tuning) estão referenciadas nos providers em `src/ingest/providers/` e `src/integrations/`.
+Variáveis adicionais (LRCLIB, AssemblyAI, Music.ai fine-tuning) estão referenciadas nos providers em `src/ingest/providers/` e `src/integrations/`.
 
 ---
 

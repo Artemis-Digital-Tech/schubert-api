@@ -4,7 +4,7 @@ export type TranscriptionOptions = {
   language?: string;
 };
 
-/** Transcrição de letra com alinhamento temporal (AudioShake e futuros provedores). */
+/** Transcrição de letra com alinhamento temporal (AssemblyAI e futuros provedores). */
 export interface ILyricsTranscriptionProvider {
   transcribe(
     audioPath: string,
