@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'crypto';
-import { unlink } from 'fs/promises';
+import { rm, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 
 import {
   Inject,
@@ -31,6 +31,8 @@ import { Artist, ArtistDocument } from '../artists/schemas/artist.schema';
 import { SlugService } from '../slug/slug.service';
 import { Track, TrackDocument } from '../tracks/schemas/track.schema';
 import { detectOriginalTuneFromChords } from './detect-key.util';
+import { cleanupChordEvents } from './mappers/chord-cleanup';
+import { alignLyricsToAsr } from './mappers/lyrics-hybrid-align';
 import { parseIngestMultipartMeta } from './ingest-meta.parser';
 import {
   CHORD_SECTION_PROVIDER,
@@ -40,6 +42,9 @@ import { LyricsTranscriptionStrategyFactory } from './strategies/lyrics-transcri
 import { YoutubeSearchPort } from '../integrations/youtube-search/youtube-search.port';
 import { AudioStoragePort } from '../integrations/audio-storage/audio-storage.port';
 import { IngestCachePort } from '../integrations/ingest-cache/ingest-cache.port';
+
+/** Abaixo disto, a letra do LRCLIB é considerada de outra versão/gravação. */
+const HYBRID_MIN_MATCH_RATIO = 0.45;
 
 export type IngestRunInput = {
   file: Express.Multer.File;
@@ -93,6 +98,13 @@ export class IngestService {
     return /^(1|true|yes|on)$/i.test(String(raw).trim());
   }
 
+  /** `INGEST_LYRICS_HYBRID_ALIGN=0` desativa o alinhamento LRCLIB × transcrição (ativo por omissão). */
+  private isHybridAlignEnabled(): boolean {
+    const raw = this.config.get<string>('INGEST_LYRICS_HYBRID_ALIGN');
+    if (raw == null || String(raw).trim() === '') return true;
+    return !/^(0|false|no|off)$/i.test(String(raw).trim());
+  }
+
   async run(input: IngestRunInput): Promise<TrackDocument> {
     const stage = async (
       name:
@@ -143,7 +155,7 @@ export class IngestService {
         original_tune?: string;
       }>(chordSectionCacheKey);
       const {
-        chords,
+        chords: rawChords,
         sections,
         original_tune: workflowOriginalTune,
       } = cachedChordSection
@@ -156,10 +168,12 @@ export class IngestService {
       if (!cachedChordSection) {
         await this.ingestCache.set(
           chordSectionCacheKey,
-          { chords, sections, original_tune: workflowOriginalTune },
+          { chords: rawChords, sections, original_tune: workflowOriginalTune },
           60 * 60 * 24 * 90,
         );
       }
+      // Sequência limpa para leitura: eventos repetidos fundidos, ruídos curtos absorvidos.
+      const chords = cleanupChordEvents(rawChords);
       await stage('resolveChordsAndSections', 'completed', 35, {
         cacheHit: Boolean(cachedChordSection),
       });
@@ -214,31 +228,70 @@ export class IngestService {
         }
       }
 
-      if (!lyrics.length) {
-        const lyricsCacheKey = `lyrics:${audioHash}:${billingPlan
-          }:pt`;
-        const cachedLyrics = await this.ingestCache.get<{
+      const transcribeCached = async (
+        wordBoost?: string[],
+      ): Promise<TranscriptionLyricSegmentSubdoc[]> => {
+        const key = `lyrics:${audioHash}:${billingPlan}:auto:v2`;
+        const cached = await this.ingestCache.get<{
           lyrics: TranscriptionLyricSegmentSubdoc[];
-          source: LyricsSource;
-        }>(lyricsCacheKey);
-        if (cachedLyrics?.lyrics?.length) {
-          lyrics = cachedLyrics.lyrics;
-          lyricsSource = cachedLyrics.source;
+        }>(key);
+        if (cached?.lyrics?.length) {
           lyricsCacheHit = true;
-          this.logger.log(`Letra via cache: ${lyrics.length} segmento(s).`);
-        } else {
-          const tx = this.transcriptionStrategyFactory.select(billingPlan);
-          lyrics = await tx.transcribe(tmpPath, { language: 'pt' });
-          lyricsSource = 'AI';
-          await this.ingestCache.set(
-            lyricsCacheKey,
-            { lyrics, source: lyricsSource },
-            60 * 60 * 24 * 30,
-          );
-          this.logger.log(
-            `Transcrição (AssemblyAI): ${lyrics.length} segmento(s).`,
+          return cached.lyrics;
+        }
+        const tx = this.transcriptionStrategyFactory.select(billingPlan);
+        // Voz isolada (se configurada) dá tempos de palavra mais precisos que o mix.
+        const vocalsPath = await this.chordSectionProvider
+          .extractVocals?.(tmpPath)
+          .catch(() => null);
+        const out = await tx
+          .transcribe(vocalsPath || tmpPath, { wordBoost })
+          .finally(() => {
+            if (vocalsPath)
+              void rm(dirname(vocalsPath), { recursive: true, force: true }).catch(
+                () => undefined,
+              );
+          });
+        if (out.length) {
+          await this.ingestCache.set(key, { lyrics: out }, 60 * 60 * 24 * 30);
+        }
+        return out;
+      };
+
+      if (lyrics.length && this.isHybridAlignEnabled()) {
+        // Texto do LRCLIB + tempo real das palavras medido no áudio analisado.
+        try {
+          const boost = [
+            ...new Set(
+              lyrics.flatMap((s) => (s.words ?? []).map((w) => w.word)),
+            ),
+          ];
+          const asr = await transcribeCached(boost);
+          const aligned = alignLyricsToAsr(lyrics, asr);
+          if (aligned.matchedRatio >= HYBRID_MIN_MATCH_RATIO) {
+            lyrics = aligned.segments;
+            this.logger.log(
+              `Letra híbrida: ${Math.round(aligned.matchedRatio * 100)}% alinhada, desvio ${aligned.offsetSec}s.`,
+            );
+          } else if (asr.length) {
+            // LRCLIB de outra versão/gravação: a transcrição está no tempo certo.
+            this.logger.warn(
+              `LRCLIB não corresponde ao áudio (${Math.round(aligned.matchedRatio * 100)}% alinhado) — usando a transcrição.`,
+            );
+            lyrics = asr;
+            lyricsSource = 'AI';
+          }
+        } catch (e) {
+          this.logger.warn(
+            `Alinhamento híbrido falhou; mantida a letra do LRCLIB: ${(e as Error).message}`,
           );
         }
+      }
+
+      if (!lyrics.length) {
+        lyrics = await transcribeCached();
+        lyricsSource = 'AI';
+        this.logger.log(`Transcrição (AssemblyAI): ${lyrics.length} linha(s).`);
       }
       await stage('resolveLyrics', 'completed', 60, {
         cacheHit: lyricsCacheHit,

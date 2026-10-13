@@ -12,7 +12,10 @@ import type {
   ILyricsTranscriptionProvider,
   TranscriptionOptions,
 } from '../domain/lyrics-transcription.port';
-import { assemblyaiSentencesToLyricSegments } from '../mappers/assemblyai-sentences.mapper';
+import {
+  assemblyaiWordsToLyricSegments,
+  type AsrWord,
+} from '../mappers/assemblyai-words.mapper';
 
 const LANG_LABEL: Record<string, string> = {
   en: 'english',
@@ -55,8 +58,8 @@ export class AssemblyaiLyricsTranscriptionProvider implements ILyricsTranscripti
         10,
       ) || 3000,
     );
-    const lang = (options?.language || 'en').toLowerCase().slice(0, 2);
-    const languageLabel = LANG_LABEL[lang] || lang || 'unknown';
+    /** Sem idioma explícito, a AssemblyAI deteta-o (músicas em PT, EN, ES…). */
+    const lang = options?.language?.trim().toLowerCase().slice(0, 2) ?? '';
 
     const buf = await readFile(audioPath);
     const up = await fetch(`${base}/v2/upload`, {
@@ -88,6 +91,11 @@ export class AssemblyaiLyricsTranscriptionProvider implements ILyricsTranscripti
     };
     if (lang.length === 2) request.language_code = lang;
     else request.language_detection = true;
+    if (options?.wordBoost?.length) {
+      // Letra conhecida (ex.: LRCLIB) ajuda a reconhecer as palavras certas.
+      request.word_boost = options.wordBoost.slice(0, 1000);
+      request.boost_param = 'high';
+    }
     if (speechModel) request.speech_model = speechModel;
 
     const cr = await fetch(`${base}/v2/transcript`, {
@@ -110,6 +118,8 @@ export class AssemblyaiLyricsTranscriptionProvider implements ILyricsTranscripti
         'AssemblyAI: resposta sem transcript id',
       );
 
+    let words: AsrWord[] = [];
+    let detected = lang;
     for (;;) {
       const tr = await fetch(`${base}/v2/transcript/${transcriptId}`, {
         headers: { authorization: apiKey },
@@ -117,6 +127,8 @@ export class AssemblyaiLyricsTranscriptionProvider implements ILyricsTranscripti
       const task = (await tr.json().catch(() => ({}))) as {
         status?: TranscriptStatus;
         error?: string;
+        words?: AsrWord[];
+        language_code?: string;
       };
       if (!tr.ok) {
         throw new ServiceUnavailableException(`AssemblyAI poll: ${tr.status}`);
@@ -126,22 +138,19 @@ export class AssemblyaiLyricsTranscriptionProvider implements ILyricsTranscripti
           `AssemblyAI transcript erro: ${task.error ?? 'desconhecido'}`,
         );
       }
-      if (task.status === 'completed') break;
+      if (task.status === 'completed') {
+        words = Array.isArray(task.words) ? task.words : [];
+        detected = (task.language_code || lang || '').toLowerCase();
+        break;
+      }
       await new Promise((r) => setTimeout(r, pollMs));
     }
 
-    const sr = await fetch(`${base}/v2/transcript/${transcriptId}/sentences`, {
-      headers: { authorization: apiKey },
-    });
-    if (!sr.ok)
-      throw new ServiceUnavailableException(
-        `AssemblyAI sentences: ${sr.status}`,
-      );
-    const rawJson = await sr.json().catch(() => null);
-
-    const segments = assemblyaiSentencesToLyricSegments(rawJson, languageLabel);
+    const short = detected.slice(0, 2);
+    const languageLabel = LANG_LABEL[short] || detected || 'unknown';
+    const segments = assemblyaiWordsToLyricSegments(words, languageLabel);
     this.logger.log(
-      `AssemblyAI: ${segments.length} segmento(s), transcript=${transcriptId}`,
+      `AssemblyAI: ${segments.length} linha(s), idioma=${detected || '?'}, transcript=${transcriptId}`,
     );
     return segments;
   }

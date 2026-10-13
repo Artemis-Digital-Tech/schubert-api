@@ -1,3 +1,4 @@
+import { readdirSync } from 'fs';
 import { mkdir, mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -238,6 +239,56 @@ export class MusicAiChordSectionProvider implements IChordSectionProvider {
           void client.deleteJob(id).catch(() => undefined);
         }
       }
+    }
+  }
+
+  /**
+   * Separa a voz com o workflow `MUSIC_AI_VOCALS_WORKFLOW` (ex.: stems). Devolve o caminho de
+   * um ficheiro de áudio temporário com a voz, ou `null` se o workflow não estiver configurado
+   * ou falhar (o ingest continua com o mix completo).
+   */
+  async extractVocals(audioPath: string): Promise<string | null> {
+    const workflow = this.config
+      .get<string>('MUSIC_AI_VOCALS_WORKFLOW')
+      ?.trim();
+    const apiKey = this.config.get<string>('MUSIC_AI_API_KEY')?.trim();
+    if (!workflow || !apiKey) return null;
+    const apiEndpoint = this.config
+      .get<string>('MUSIC_AI_API_ENDPOINT')
+      ?.trim();
+    const client = new MusicAi({
+      apiKey,
+      ...(apiEndpoint ? { apiEndpoint } : {}),
+    });
+    const outDir = await mkdtemp(join(tmpdir(), 'musicai-vocals-'));
+    let jobId: string | null = null;
+    try {
+      const inputUrl = await client.uploadFile(audioPath);
+      jobId = await client.addJob({
+        name: `schubert-vocals-${Date.now()}`,
+        workflow,
+        params: { inputUrl },
+      });
+      const job = await client.waitForJobCompletion(jobId);
+      if (job.status === 'FAILED') return null;
+      await client.downloadJobResults(job, outDir);
+      const files = readdirSync(outDir).filter((f) =>
+        /\.(wav|mp3|flac|m4a|ogg)$/i.test(f),
+      );
+      const pick =
+        files.find(
+          (f) =>
+            /vocal|voice|voz/i.test(f) &&
+            !/no[_-]?vocal|instrumental|accomp/i.test(f),
+        ) ?? (files.length === 1 ? files[0] : undefined);
+      if (!pick) return null;
+      this.logger.log(`Music.AI: voz isolada (${pick}).`);
+      return join(outDir, pick);
+    } catch (e) {
+      this.logger.warn(`Music.AI voz isolada falhou: ${(e as Error).message}`);
+      return null;
+    } finally {
+      if (jobId) void client.deleteJob(jobId).catch(() => undefined);
     }
   }
 

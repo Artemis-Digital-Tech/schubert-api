@@ -13,4 +13,9 @@ export type ChordSectionAnalysisResult = {
 /** Análise de acordes e secções a partir de um ficheiro de áudio (ex.: music.ai). */
 export interface IChordSectionProvider {
   analyze(audioPath: string): Promise<ChordSectionAnalysisResult>;
+  /**
+   * Voz isolada do áudio (ficheiro local temporário), para transcrever só a voz — tempos de
+   * palavra mais precisos. `null` quando não configurado/indisponível. Quem chama apaga o ficheiro.
+   */
+  extractVocals?(audioPath: string): Promise<string | null>;
 }
