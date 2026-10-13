@@ -7,8 +7,10 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Agent, fetch as undiciFetch, FormData } from 'undici';
+import { truncateMp3BufferToMaxDurationSeconds } from './mp3-truncate.util';
 import { MusicRecognitionPort } from './music-recognition.port';
 import { RecognizedSongDto } from './recognized-song.dto';
+import { YoutubeSearchPort } from '../youtube-search/youtube-search.port';
 
 type AudDResult = {
   artist: string;
@@ -41,8 +43,25 @@ type AudDResponse =
       error?: { error_code: number; error_message: string };
     };
 
-/** Documentação AudD: ficheiro demasiado grande — 10M ou 25 segundos no máximo. */
-const AUDD_MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+/** Documentação AudD: ficheiro demasiado grande — ~10 MB e ~25 s de áudio no máximo. */
+const AUDD_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/** AudD só precisa de excerto para reconhecimento; evita upload/circuitos completos. */
+const AUDD_MAX_AUDIO_SECONDS = 25;
+
+function shouldTruncateAsMp3(input: {
+  filename: string;
+  mimeType: string;
+}): boolean {
+  const name = (input.filename ?? '').toLowerCase();
+  const mime = (input.mimeType ?? '').toLowerCase();
+  return (
+    name.endsWith('.mp3') ||
+    mime === 'audio/mpeg' ||
+    mime === 'audio/mp3' ||
+    mime === 'audio/x-mpeg'
+  );
+}
 
 const AUDD_FETCH_ATTEMPTS = 3;
 
@@ -71,7 +90,10 @@ function isTransientAuddNetworkError(err: unknown): boolean {
   ) {
     return true;
   }
-  const cause = err instanceof Error ? (err as Error & { cause?: unknown }).cause : undefined;
+  const cause =
+    err instanceof Error
+      ? (err as Error & { cause?: unknown }).cause
+      : undefined;
   if (cause && typeof cause === 'object' && 'code' in cause) {
     const code = String((cause as NodeJS.ErrnoException).code);
     return ['EPIPE', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND'].includes(code);
@@ -92,7 +114,10 @@ export class AudDMusicRecognitionService
     headersTimeout: 120_000,
   });
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly youtubeSearch: YoutubeSearchPort,
+  ) {
     super();
   }
 
@@ -118,10 +143,20 @@ export class AudDMusicRecognitionService
       );
     }
 
+    const bufferForAudD = shouldTruncateAsMp3(input)
+      ? truncateMp3BufferToMaxDurationSeconds(
+          input.buffer,
+          AUDD_MAX_AUDIO_SECONDS,
+        )
+      : input.buffer;
+
+    const payload = { ...input, buffer: bufferForAudD };
+
     let res: Awaited<ReturnType<typeof undiciFetch>>;
     try {
-      res = await this.postToAudDWithRetries(token, input);
+      res = await this.postToAudDWithRetries(token, payload);
     } catch (err) {
+      console.error('Error calling AudD:', err);
       const chain = formatUndiciErrorChain(err);
       const hint = isTransientAuddNetworkError(err)
         ? ' Erro de rede/socket (timeout, ligação caída ou bloqueio intermédio). Tente um MP3 menor (< 1 MB, ~20 s), outra rede ou desativar VPN/firewall.'
@@ -140,6 +175,7 @@ export class AudDMusicRecognitionService
     const data = (await res.json()) as AudDResponse;
 
     if (data.status === 'error') {
+      console.error('Error calling AudD:', data.error);
       const msg = data.error?.error_message ?? 'Unknown AudD error';
       throw new BadGatewayException(`AudD error: ${msg}`);
     }
@@ -151,11 +187,14 @@ export class AudDMusicRecognitionService
     return this.mapResult(data.result);
   }
 
-  private buildAudDForm(token: string, input: {
-    buffer: Buffer;
-    filename: string;
-    mimeType: string;
-  }): FormData {
+  private buildAudDForm(
+    token: string,
+    input: {
+      buffer: Buffer;
+      filename: string;
+      mimeType: string;
+    },
+  ): FormData {
     const form = new FormData();
     form.append('api_token', token);
     form.append('return', 'spotify,apple_music');
@@ -194,7 +233,7 @@ export class AudDMusicRecognitionService
     throw lastError instanceof Error ? lastError : new Error(String(lastError));
   }
 
-  private mapResult(r: AudDResult): RecognizedSongDto {
+  private async mapResult(r: AudDResult): Promise<RecognizedSongDto> {
     const spotifyArtistIds =
       r.spotify?.artists
         ?.map((a) => a.id)
@@ -207,7 +246,7 @@ export class AudDMusicRecognitionService
       r.apple_music?.durationInMillis ??
       r.apple_music?.attributes?.durationInMillis;
 
-    return {
+    const mapped: RecognizedSongDto = {
       title: r.title,
       artist: r.artist,
       album: r.album,
@@ -220,6 +259,14 @@ export class AudDMusicRecognitionService
       duration_ms: durationMs,
       cover_image_url: this.pickCoverImageUrl(r),
     };
+
+    const youtubeUrl = await this.youtubeSearch.findSongVideoUrl({
+      title: mapped.title,
+      artist: mapped.artist,
+    });
+    if (youtubeUrl) mapped.youtube_url = youtubeUrl;
+
+    return mapped;
   }
 
   /** Spotify e Apple Music (via `return`) trazem arte; escolhe a maior imagem do Spotify quando existir. */

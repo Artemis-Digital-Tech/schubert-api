@@ -16,13 +16,15 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { Public } from '../auth/public.decorator';
 import type { JwtAuthUser } from '../auth/jwt.strategy';
 import { MusicRecognitionPort } from '../integrations/music-recognition/music-recognition.port';
 import { TrackIdentifyResponseDto } from './dto/track-identify-response.dto';
+import { MAX_MP3_UPLOAD_BYTES } from '../upload-limits.constants';
 import { TracksService } from './tracks.service';
 
-/** Limite da API AudD: ~10 MB e ~25 s de áudio; acima disso o servidor corta a ligação (ex.: `EPIPE` no cliente). */
-const MAX_BYTES = 10 * 1024 * 1024;
+/** Multer — mesmo limite que o cliente; o envio à AudD usa só ~25 s após truncagem no serviço de reconhecimento. */
+const IDENTIFY_UPLOAD_LIMIT_BYTES = MAX_MP3_UPLOAD_BYTES;
 
 function isMp3Upload(file: Express.Multer.File): boolean {
   const name = (file.originalname ?? '').toLowerCase();
@@ -34,6 +36,20 @@ function isMp3Upload(file: Express.Multer.File): boolean {
 
 type RequestWithJwtUser = Request & { user?: JwtAuthUser };
 
+function isTrackAuth0Owner(
+  track: { owner?: unknown; userId?: unknown } | null | undefined,
+  sub: string,
+): boolean {
+  if (!track || !sub.trim()) return false;
+  const owner =
+    typeof track.owner === 'string' && track.owner.trim()
+      ? track.owner.trim()
+      : typeof track.userId === 'string' && track.userId.trim()
+        ? track.userId.trim()
+        : '';
+  return Boolean(owner && owner === sub.trim());
+}
+
 @Controller('tracks')
 export class TracksController {
   constructor(
@@ -42,11 +58,45 @@ export class TracksController {
   ) { }
 
   /**
-   * Devolve o documento `Track` (com `artistId` populado) por `trackId` ou `spotifyId`.
+   * Devolve o documento `Track` (com `artistId` populado) por slugs do artista e da música.
+   * Leitura pública (sem JWT); escrita continua em PATCH com dono.
    */
+  @Public()
+  @Get('by-slug/:artistSlug/:songSlug')
+  async findBySlug(
+    @Param('artistSlug') artistSlug: string,
+    @Param('songSlug') songSlug: string,
+    @Req() req: RequestWithJwtUser,
+  ) {
+    const viewerSub = req.user?.sub?.trim() || undefined;
+    const found = await this.tracks.findTrackAndVariationsBySlugs(
+      artistSlug,
+      songSlug,
+      viewerSub,
+    );
+    const track = found?.track ?? null;
+    if (!track) {
+      throw new NotFoundException(
+        `Nenhuma faixa com os slugs «${artistSlug}» / «${songSlug}».`,
+      );
+    }
+    return {
+      ...track.toJSON(),
+      variations: (found?.variations ?? []).map((variation) =>
+        variation.toJSON(),
+      ),
+    };
+  }
+
+  /**
+   * Devolve o documento `Track` (com `artistId` populado) por `trackId` ou `spotifyId`.
+   * Leitura pública (sem JWT).
+   */
+  @Public()
   @Get('by-key/:key')
-  async findByKey(@Param('key') key: string) {
-    const track = await this.tracks.findByPublicKey(key);
+  async findByKey(@Param('key') key: string, @Req() req: RequestWithJwtUser) {
+    const viewerSub = req.user?.sub?.trim() || undefined;
+    const track = await this.tracks.findByPublicKey(key, viewerSub);
     if (!track) {
       throw new NotFoundException(`Nenhuma faixa com a chave «${key}».`);
     }
@@ -61,10 +111,13 @@ export class TracksController {
   @HttpCode(HttpStatus.OK)
   @UseInterceptors(
     FileInterceptor('file', {
-      limits: { fileSize: MAX_BYTES },
+      limits: {
+        fileSize: IDENTIFY_UPLOAD_LIMIT_BYTES,
+      },
     }),
   )
   async identify(
+    @Req() req: RequestWithJwtUser,
     @UploadedFile() file: Express.Multer.File | undefined,
   ): Promise<TrackIdentifyResponseDto> {
     if (!file?.buffer?.length) {
@@ -89,18 +142,86 @@ export class TracksController {
       return { recognized: false, song: null, track: null };
     }
 
+    const viewerSub = req.user?.sub?.trim() || '';
     const track = await this.tracks.findConfiguredTrackForRecognition(song);
+    const referenceKey =
+      track?.trackId?.trim() || track?.spotifyId?.trim() || '';
+    const preferredTrack =
+      track && viewerSub && referenceKey
+        ? await this.tracks.findByPublicKey(referenceKey, viewerSub)
+        : track;
+    const variationKey = (track as unknown as { variationKey?: string } | null)
+      ?.variationKey;
+    const isCanonicalBase =
+      variationKey === '__base__' ||
+      variationKey === undefined ||
+      variationKey === '';
+    /** Dono da cifra base (documento catalogado): só “Editar”; visitantes podem “Criar variação”. */
+    const isOwnerOfBaseChord = isTrackAuth0Owner(track, viewerSub);
+    const canEditTrack = isTrackAuth0Owner(
+      preferredTrack as unknown as { owner?: unknown; userId?: unknown },
+      viewerSub,
+    );
     return {
       recognized: true,
       song,
-      track: track
-        ? (track.toJSON() as unknown as Record<string, unknown>)
+      track: preferredTrack
+        ? (preferredTrack.toJSON() as unknown as Record<string, unknown>)
         : null,
+      canEditTrack,
+      canCreateVariation: Boolean(
+        viewerSub &&
+        track &&
+        preferredTrack &&
+        !isOwnerOfBaseChord &&
+        String(track._id) === String(preferredTrack._id) &&
+        isCanonicalBase,
+      ),
     };
   }
 
   /**
-   * Atualização parcial de acordes, `lyricsVariants` e/ou `sections` (apenas dono da faixa).
+   * Atualização parcial por slugs (`/cifras/:artistSlug/:songSlug`).
+   */
+  @Patch('by-slug/:artistSlug/:songSlug')
+  async patchBySlug(
+    @Param('artistSlug') artistSlug: string,
+    @Param('songSlug') songSlug: string,
+    @Req() req: RequestWithJwtUser,
+    @Body()
+    body: {
+      chords?: unknown;
+      lyrics?: unknown;
+      lyricsSource?: 'AI' | 'MATCH';
+      sections?: unknown;
+      variationLabel?: unknown;
+      is_private?: unknown;
+    },
+  ) {
+    const sub = req.user?.sub;
+    if (!sub?.trim()) {
+      throw new UnauthorizedException(
+        'Sessão inválida: falta identificador Auth0.',
+      );
+    }
+    const doc = await this.tracks.updateTranscriptionBySlugs(
+      artistSlug.trim(),
+      songSlug.trim(),
+      sub.trim(),
+      {
+        chords: body.chords,
+        lyrics: body.lyrics,
+        lyricsSource: body.lyricsSource,
+        sections: body.sections,
+        variationLabel: body.variationLabel,
+        is_private: body.is_private,
+      },
+    );
+    return doc.toJSON();
+  }
+
+  /**
+   * Atualização parcial de acordes, `lyrics`, `lyricsSource` e/ou `sections` (apenas dono da faixa).
    */
   @Patch('by-key/:key')
   async patchByKey(
@@ -109,20 +230,31 @@ export class TracksController {
     @Body()
     body: {
       chords?: unknown;
-      lyricsVariants?: Record<string, unknown>;
+      lyrics?: unknown;
+      lyricsSource?: 'AI' | 'MATCH';
       sections?: unknown;
+      variationLabel?: unknown;
+      is_private?: unknown;
     },
   ) {
     const sub = req.user?.sub;
     if (!sub?.trim()) {
-      throw new UnauthorizedException('Sessão inválida: falta identificador Auth0.');
+      throw new UnauthorizedException(
+        'Sessão inválida: falta identificador Auth0.',
+      );
     }
-    const doc = await this.tracks.updateTranscriptionByPublicKey(key.trim(), sub.trim(), {
-      chords: body.chords,
-      lyricsVariants: body.lyricsVariants,
-      sections: body.sections,
-    });
+    const doc = await this.tracks.updateTranscriptionByPublicKey(
+      key.trim(),
+      sub.trim(),
+      {
+        chords: body.chords,
+        lyrics: body.lyrics,
+        lyricsSource: body.lyricsSource,
+        sections: body.sections,
+        variationLabel: body.variationLabel,
+        is_private: body.is_private,
+      },
+    );
     return doc.toJSON();
   }
-
 }

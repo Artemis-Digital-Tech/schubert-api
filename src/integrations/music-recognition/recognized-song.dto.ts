@@ -12,4 +12,8 @@ export type RecognizedSongDto = {
   duration_ms?: number;
   /** URL HTTP da arte do álbum, quando o fornecedor a envia (ex.: Spotify / Apple Music). */
   cover_image_url?: string;
+  /** URL do vídeo no YouTube quando disponível pelo enriquecimento. */
+  youtube_url?: string;
+  /** URL HTTPS do sample MP3 devolvida pela Spotify Web API (`preview_url`). */
+  spotify_preview_url?: string;
 };

@@ -71,18 +71,8 @@ const TranscriptionLyricSegmentSchema = SchemaFactory.createForClass(
   TranscriptionLyricSegmentSubdoc,
 );
 
-@Schema({ _id: false })
-export class TranscriptionLyricsVariantsSubdoc {
-  @Prop({ type: [TranscriptionLyricSegmentSchema], default: undefined })
-  ai?: TranscriptionLyricSegmentSubdoc[];
-
-  @Prop({ type: [TranscriptionLyricSegmentSchema], default: undefined })
-  match?: TranscriptionLyricSegmentSubdoc[];
-}
-
-const TranscriptionLyricsVariantsSchema = SchemaFactory.createForClass(
-  TranscriptionLyricsVariantsSubdoc,
-);
+export const LYRICS_SOURCE_VALUES = ['AI', 'MATCH'] as const;
+export type LyricsSource = (typeof LYRICS_SOURCE_VALUES)[number];
 
 @Schema({ _id: false })
 export class TranscriptionSectionSubdoc {
@@ -101,7 +91,6 @@ export class MusicTranscriptionMetaSubdoc {
   @Prop() name?: string;
   @Prop() sourcePathParam?: string;
   @Prop() trackId?: string;
-  @Prop() lyricsVariant?: string;
   @Prop() audioUrl?: string;
   @Prop() duration_seconds?: number;
 }
@@ -122,6 +111,10 @@ export class Track {
   @Prop({ trim: true, required: false })
   name?: string;
 
+  /** Slug da faixa (por artista), derivado do título sem parêntesis. */
+  @Prop({ trim: true, sparse: true })
+  slug?: string;
+
   @Prop({ trim: true, sparse: true, unique: true })
   spotifyId?: string;
 
@@ -137,6 +130,21 @@ export class Track {
   @Prop({ trim: true, index: true })
   owner?: string;
 
+  /**
+   * Chave de variação dentro da cifra canónica.
+   * `__base__` representa a cifra principal; para variações de utilizador usa-se o `sub` do Auth0.
+   */
+  @Prop({ trim: true, default: '__base__', index: true })
+  variationKey?: string;
+
+  /** Identificador da cifra canónica (`trackId`) quando este documento é uma variação. */
+  @Prop({ trim: true, index: true })
+  variationOfTrackId?: string;
+
+  /** Nome mostrado no selector de variações (só utilizador, ex.: «Acústico capo 2»). */
+  @Prop({ trim: true, required: false })
+  variationLabel?: string;
+
   /** Afinação original da cifra (texto livre para a sidebar, ex.: «E standard»). */
   @Prop({ trim: true, default: '' })
   original_tune?: string;
@@ -151,8 +159,15 @@ export class Track {
   @Prop({ type: [TranscriptionChordEventSchema], default: [] })
   chords: TranscriptionChordEventSubdoc[];
 
-  @Prop({ type: TranscriptionLyricsVariantsSchema, required: false })
-  lyricsVariants?: TranscriptionLyricsVariantsSubdoc;
+  @Prop({ type: [TranscriptionLyricSegmentSchema], default: undefined })
+  lyrics?: TranscriptionLyricSegmentSubdoc[];
+
+  @Prop({
+    type: String,
+    enum: LYRICS_SOURCE_VALUES,
+    required: false,
+  })
+  lyricsSource?: LyricsSource;
 
   @Prop({ type: [TranscriptionSectionSchema], default: [] })
   sections: TranscriptionSectionSubdoc[];
@@ -160,8 +175,27 @@ export class Track {
   @Prop({ type: MusicTranscriptionMetaSchema, required: false })
   meta?: MusicTranscriptionMetaSubdoc;
 
+  /** Capa (ex.: URL AudD em `cover_image_url` na identificação). */
+  @Prop({ trim: true, required: false })
+  coverImageUrl?: string;
+
+  /** URL do YouTube quando identificada/enriquecida no fluxo de reconhecimento. */
+  @Prop({ trim: true, required: false })
+  youtubeUrl?: string;
+
   @Prop({ required: false })
   chordTimeOffsetSec?: number;
 }
 
 export const TrackSchema = SchemaFactory.createForClass(Track);
+
+TrackSchema.index(
+  { artistId: 1, slug: 1, variationKey: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      slug: { $type: 'string' },
+      variationKey: { $type: 'string' },
+    },
+  },
+);
