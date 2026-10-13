@@ -221,7 +221,11 @@ export class TracksService {
   ): Promise<void> {
     if (body.chords !== undefined) {
       const durationSec = track.meta?.duration_seconds;
-      track.chords = normalizeChordListFromClient(body.chords, durationSec);
+      track.chords = normalizeChordListFromClient(
+        body.chords,
+        durationSec,
+        track.chords,
+      );
       track.markModified('chords');
     }
 

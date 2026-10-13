@@ -7,10 +7,7 @@ import type {
   LrclibSearchInput,
   LyricsMatchResult,
 } from '../domain/lyrics-search.port';
-import {
-  lrcSyncedTextToSegments,
-  plainLyricsToSingleSegment,
-} from '../mappers/lrclib-to-segments.mapper';
+import { lrcSyncedTextToSegments } from '../mappers/lrclib-to-segments.mapper';
 
 const LRCLIB_BASE = 'https://lrclib.net/api';
 
@@ -28,6 +25,8 @@ type LrcLibRecord = {
 function normalizeForMatch(text: string): string {
   return text
     .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/\([^)]*\)/g, ' ')
     .replace(/\[[^\]]*\]/g, ' ')
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -47,19 +46,6 @@ function overlapScore(a: Set<string>, b: Set<string>): number {
     if (b.has(token)) intersection += 1;
   }
   return intersection / Math.max(a.size, b.size);
-}
-
-function cleanupLrcLyrics(input: string): string {
-  return input
-    .replace(/\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]\s*/g, '')
-    .replace(/\r/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-}
-
-function pickLrcLibLyrics(rec: LrcLibRecord): string {
-  const raw = (rec.plainLyrics || rec.syncedLyrics || '').trim();
-  return cleanupLrcLyrics(raw);
 }
 
 @Injectable()
@@ -101,7 +87,7 @@ export class LrclibLyricsSearchProvider implements ILyricsSearchProvider {
     if (!searchRes.ok) return null;
 
     const rows = ((await searchRes.json()) as LrcLibRecord[]).filter(
-      (r) => !r.instrumental && (r.plainLyrics || r.syncedLyrics),
+      (r) => !r.instrumental && Boolean(r.syncedLyrics?.trim()),
     );
     if (!rows.length) return null;
 
@@ -144,20 +130,20 @@ export class LrclibLyricsSearchProvider implements ILyricsSearchProvider {
     return built;
   }
 
+  /**
+   * Só letras **sincronizadas** servem para a cifra: sem tempos não há como encaixar acordes.
+   * Letra só em texto conta como «não encontrada» (o ingest cai na transcrição).
+   */
   private recordToMatch(
     rec: LrcLibRecord,
     durationSec?: number,
   ): LyricsMatchResult | null {
     if (rec.instrumental) return null;
-    const raw = pickLrcLibLyrics(rec);
-    if (!raw) return null;
-    let segments: TranscriptionLyricSegmentSubdoc[] = [];
-    if (rec.syncedLyrics?.trim()) {
-      segments = lrcSyncedTextToSegments(rec.syncedLyrics, durationSec);
-    }
-    if (!segments.length) {
-      segments = plainLyricsToSingleSegment(raw);
-    }
+    if (!rec.syncedLyrics?.trim()) return null;
+    const segments: TranscriptionLyricSegmentSubdoc[] = lrcSyncedTextToSegments(
+      rec.syncedLyrics,
+      durationSec,
+    );
     if (!segments.length) return null;
     return { segments };
   }
