@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
-import { mkdir, readFile, unlink } from 'fs/promises';
+import { copyFile, mkdir, readFile, unlink } from 'fs/promises';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 
@@ -37,6 +37,8 @@ export class YtDlpAudioExtractService extends StreamAudioExtractPort {
     const ffmpegBin = this.config.get<string>('FFMPEG_BINARY')?.trim() || 'ffmpeg';
     const tiktokCookies = this.config.get<string>('TIKTOK_COOKIES_FILE')?.trim();
     const igCookies = this.config.get<string>('INSTAGRAM_COOKIES_FILE')?.trim();
+    const proxy = this.config.get<string>('YTDLP_PROXY')?.trim();
+    const youtubeCookies = await this.prepareYoutubeCookies(input.sourceUrl, tmpDir, outputId);
     const maxDuration = Number(
       this.config.get<string>('AUDIO_MAX_DURATION_SEC') || DEFAULT_MAX_DURATION_SEC,
     );
@@ -48,10 +50,14 @@ export class YtDlpAudioExtractService extends StreamAudioExtractPort {
       ffmpegBin,
       tiktokCookies,
       igCookies,
+      youtubeCookies,
+      proxy,
       maxDuration,
     });
 
-    const meta = await this.runYtDlp(ytDlpBin, args);
+    const meta = await this.runYtDlp(ytDlpBin, args).finally(() => {
+      if (youtubeCookies) void unlink(youtubeCookies).catch(() => undefined);
+    });
 
     let buffer: Buffer;
     try {
@@ -81,6 +87,8 @@ export class YtDlpAudioExtractService extends StreamAudioExtractPort {
     ffmpegBin: string;
     tiktokCookies?: string;
     igCookies?: string;
+    youtubeCookies?: string;
+    proxy?: string;
     maxDuration: number;
   }): string[] {
     const isTikTok = /tiktok\.com|vm\.tiktok\.com/i.test(opts.url);
@@ -120,8 +128,38 @@ export class YtDlpAudioExtractService extends StreamAudioExtractPort {
       args.push('--cookies', opts.igCookies);
     }
 
+    if (opts.youtubeCookies) {
+      args.push('--cookies', opts.youtubeCookies);
+    }
+
+    if (opts.proxy) {
+      args.push('--proxy', opts.proxy);
+    }
+
     args.push(opts.url);
     return args;
+  }
+
+  /**
+   * O YouTube bloqueia IPs de datacenter ("Sign in to confirm you're not a bot").
+   * O yt-dlp regrava o ficheiro de cookies no fim; usamos uma cópia por execução
+   * para não alterar o original (montado no container) nem disputar escrita entre jobs.
+   */
+  private async prepareYoutubeCookies(
+    url: string,
+    tmpDir: string,
+    outputId: string,
+  ): Promise<string | undefined> {
+    const source = this.config.get<string>('YOUTUBE_COOKIES_FILE')?.trim();
+    if (!source || !/youtube\.com|youtu\.be/i.test(url)) return undefined;
+    const target = join(tmpDir, `${outputId}.cookies.txt`);
+    try {
+      await copyFile(source, target);
+      return target;
+    } catch (err) {
+      this.logger.warn(`YOUTUBE_COOKIES_FILE inacessível (${source}): ${(err as Error).message}`);
+      return undefined;
+    }
   }
 
   private runYtDlp(
