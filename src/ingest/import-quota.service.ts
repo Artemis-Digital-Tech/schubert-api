@@ -12,8 +12,10 @@ import type {
 import { resolveIngestBillingPlan } from '../auth/caller-context.util';
 import { IngestJobsService } from '../ingest-jobs/ingest-jobs.service';
 import {
+  IMPORT_QUOTA_RULES,
+  IMPORT_QUOTA_WINDOW_DAYS,
   IMPORT_QUOTA_WINDOW_MS,
-  WEEKLY_IMPORT_LIMITS,
+  type ImportQuotaWindow,
 } from './import-quota.constants';
 
 export type ImportQuotaStatus = {
@@ -21,8 +23,11 @@ export type ImportQuotaStatus = {
   limit: number;
   used: number;
   remaining: number;
-  windowDays: number;
-  /** Quando a importação mais antiga da janela expira (liberta um slot). */
+  /** `lifetime` = cota total sem renovação; `rolling` = janela deslizante de `windowDays`. */
+  window: ImportQuotaWindow;
+  /** Dias da janela deslizante; `null` na cota vitalícia. */
+  windowDays: number | null;
+  /** Quando a importação mais antiga da janela expira (liberta um slot). Sempre `null` na cota vitalícia. */
   nextSlotAt: string | null;
 };
 
@@ -30,34 +35,42 @@ export type ImportQuotaStatus = {
 export class ImportQuotaService {
   constructor(private readonly ingestJobs: IngestJobsService) {}
 
-  weeklyLimit(plan: IngestBillingPlan): number {
-    return WEEKLY_IMPORT_LIMITS[plan];
-  }
-
   async getStatus(
     ownerSub: string,
     plan: IngestBillingPlan,
   ): Promise<ImportQuotaStatus> {
-    const limit = this.weeklyLimit(plan);
-    const used = await this.ingestJobs.countWeeklyImports(ownerSub);
-    const remaining = Math.max(0, limit - used);
-    const oldest = await this.ingestJobs.findOldestWeeklyImport(ownerSub);
-    const nextSlotAt =
-      used >= limit && oldest
-        ? new Date(oldest.getTime() + IMPORT_QUOTA_WINDOW_MS).toISOString()
+    const { limit, window } = IMPORT_QUOTA_RULES[plan];
+    const since =
+      window === 'rolling'
+        ? new Date(Date.now() - IMPORT_QUOTA_WINDOW_MS)
         : null;
+    const used = await this.ingestJobs.countImports(ownerSub, since);
+    const remaining = Math.max(0, limit - used);
+
+    let nextSlotAt: string | null = null;
+    if (window === 'rolling' && used >= limit) {
+      const oldest = await this.ingestJobs.findOldestImport(ownerSub, since);
+      if (oldest) {
+        nextSlotAt = new Date(
+          oldest.getTime() + IMPORT_QUOTA_WINDOW_MS,
+        ).toISOString();
+      }
+    }
 
     return {
       plan,
       limit,
       used,
       remaining,
-      windowDays: 7,
+      window,
+      windowDays: window === 'rolling' ? IMPORT_QUOTA_WINDOW_DAYS : null,
       nextSlotAt,
     };
   }
 
-  async assertCanImport(caller: IngestCallerLogPayload): Promise<ImportQuotaStatus> {
+  async assertCanImport(
+    caller: IngestCallerLogPayload,
+  ): Promise<ImportQuotaStatus> {
     const ownerSub = caller.auth0Sub?.trim();
     if (!ownerSub || ownerSub === '(sem utilizador no request)') {
       throw new ForbiddenException({
@@ -83,8 +96,10 @@ export class ImportQuotaService {
   }
 
   private quotaExceededMessage(plan: IngestBillingPlan, limit: number): string {
-    const planLabel =
-      plan === 'pro' ? 'Pro' : plan === 'starter' ? 'Starter' : 'Gratuito';
-    return `Atingiu o limite de ${limit} importações por semana do plano ${planLabel}.`;
+    if (IMPORT_QUOTA_RULES[plan].window === 'lifetime') {
+      return `Já usou as ${limit} músicas incluídas no plano Gratuito. Assine um plano para importar mais.`;
+    }
+    const planLabel = plan === 'pro' ? 'Pro' : 'Starter';
+    return `Atingiu o limite de ${limit} músicas em ${IMPORT_QUOTA_WINDOW_DAYS} dias do plano ${planLabel}.`;
   }
 }

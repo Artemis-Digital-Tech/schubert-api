@@ -2,7 +2,6 @@ import { randomBytes, createHash } from 'crypto';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { IMPORT_QUOTA_WINDOW_MS } from '../ingest/import-quota.constants';
 import {
   IngestJob,
   IngestJobDocument,
@@ -54,26 +53,25 @@ export class IngestJobsService {
       .exec();
   }
 
-  private weeklyWindowStart(): Date {
-    return new Date(Date.now() - IMPORT_QUOTA_WINDOW_MS);
-  }
-
-  /** Importações na janela deslizante de 7 dias (queued, running ou completed). */
-  async countWeeklyImports(ownerSub: string): Promise<number> {
+  /** Importações que contam para a cota (queued, running ou completed); `since` = início da janela, `null` = desde sempre. */
+  async countImports(ownerSub: string, since: Date | null): Promise<number> {
     return this.ingestJobModel
       .countDocuments({
         ownerSub,
-        createdAt: { $gte: this.weeklyWindowStart() },
+        ...(since ? { createdAt: { $gte: since } } : {}),
         status: { $in: [...QUOTA_COUNT_STATUSES] },
       })
       .exec();
   }
 
-  async findOldestWeeklyImport(ownerSub: string): Promise<Date | null> {
+  async findOldestImport(
+    ownerSub: string,
+    since: Date | null,
+  ): Promise<Date | null> {
     const doc = await this.ingestJobModel
       .findOne({
         ownerSub,
-        createdAt: { $gte: this.weeklyWindowStart() },
+        ...(since ? { createdAt: { $gte: since } } : {}),
         status: { $in: [...QUOTA_COUNT_STATUSES] },
       })
       .sort({ createdAt: 1 })
